@@ -232,7 +232,7 @@ function formatDigest(windows) {
   const body = windows.map(formatWindow).join("\n\n");
   return `${header}
 
-Upcoming windows at *${name}* matching your sweet spot (1–3ft, ≤5kt wind, -1 to +1ft tide, ≥8s period):
+Upcoming windows at *${name}* matching your sweet spot (1–3ft, ≤5kt wind, -1 to +1ft tide, ≥8s swell period):
 
 ${body}
 
@@ -345,7 +345,7 @@ function generateHtml(daylight, windows, generatedAt) {
     Your sweet spot: <b>Surf ${criteria.surfHeightMin_ft}–${criteria.surfHeightMax_ft} ft</b> ·
     <b>Wind ≤ ${criteria.windMax_kts} kt</b> ·
     <b>Tide ${criteria.tideMin_ft} to ${criteria.tideMax_ft} ft</b> ·
-    <b>Period ≥ ${criteria.swellPeriodMin_s}s</b>
+    <b>Swell period ≥ ${criteria.swellPeriodMin_s}s</b>
   </div>
 
   <h2>Daylight hours (number = surf height, ft)</h2>

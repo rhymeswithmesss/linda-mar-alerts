@@ -1,7 +1,7 @@
 # 🏄 Linda Mar Sweet Spot Alerts
 
 Notifies you when Linda Mar conditions match your personal sweet spot:
-small (1–3ft), glassy (≤5 kts wind), low tide (-1 to +1 ft), with some shape (≥8s period).
+small (1–3ft), glassy (≤5 kts wind), low tide (-1 to +1 ft), with some shape (≥8s swell period).
 
 Once a day it scans the 7-day forecast, **emails a digest** of upcoming matching windows, and
 **publishes a color-coded dashboard** (every daylight hour, ✅/❌ per criterion) to GitHub Pages:
