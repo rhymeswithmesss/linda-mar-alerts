@@ -1,0 +1,39 @@
+name: Linda Mar Surf Alert
+
+on:
+  # Runs every morning during surf season hours (PT = UTC-7/8)
+  # Checks at 5:30am, 6:00am, 6:30am, 7:00am, 7:30am, 8:00am PT
+  schedule:
+    - cron: "30 12 * * *"   # 5:30am PT (UTC-7)
+    - cron: "0 13 * * *"    # 6:00am PT
+    - cron: "30 13 * * *"   # 6:30am PT
+    - cron: "0 14 * * *"    # 7:00am PT
+    - cron: "30 14 * * *"   # 7:30am PT
+    - cron: "0 15 * * *"    # 8:00am PT
+
+  # Also allows manual trigger for testing
+  workflow_dispatch:
+
+jobs:
+  check-surf:
+    name: Check Linda Mar Conditions
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check surf conditions
+        env:
+          STORMGLASS_API_KEY: ${{ secrets.STORMGLASS_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          TWILIO_ACCOUNT_SID: ${{ secrets.TWILIO_ACCOUNT_SID }}
+          TWILIO_AUTH_TOKEN: ${{ secrets.TWILIO_AUTH_TOKEN }}
+          TWILIO_FROM: ${{ secrets.TWILIO_FROM }}
+          TWILIO_TO: ${{ secrets.TWILIO_TO }}
+        run: node check-surf.js
