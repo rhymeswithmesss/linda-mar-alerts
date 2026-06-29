@@ -39,6 +39,9 @@ jobs:
       - name: Check surf conditions & generate dashboard
         env:
           STORMGLASS_API_KEY: ${{ secrets.STORMGLASS_API_KEY }}
+          SURFLINE_TOKEN: ${{ secrets.SURFLINE_TOKEN }}
+          SURFLINE_EMAIL: ${{ secrets.SURFLINE_EMAIL }}
+          SURFLINE_PASSWORD: ${{ secrets.SURFLINE_PASSWORD }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           EMAIL_TO: ${{ secrets.EMAIL_TO }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}

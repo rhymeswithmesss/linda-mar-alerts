@@ -28,8 +28,10 @@ const CONFIG = {
     lng: -122.4998,
   },
   criteria: {
-    surfHeightMin_ft: 1.0,   // minimum surf height in feet
-    surfHeightMax_ft: 3.0,   // maximum surf height in feet
+    surfHeightMin_ft: 1.0,    // minimum surf height in feet
+    surfHeightMax_ft: 3.0,    // max SURF (breaking-face) height — applies to Surfline LOLA data
+    surfHeightMaxHs_ft: 5.0,  // max SIGNIFICANT WAVE height — applies to the Stormglass fallback
+                              //   (offshore Hs runs higher than breaking surf; ~5ft Hs ≈ your 3ft surf)
     windMax_kts: 5,           // max wind in knots (glassy threshold)
     tideMin_ft: -1.0,         // low tide window start
     tideMax_ft: 1.0,          // low tide window end
@@ -38,6 +40,11 @@ const CONFIG = {
   forecastDays: 7,            // how far ahead to scan (Stormglass free tier returns ~7-10 days)
   daylightStartHour: 6,       // earliest hour to consider, PT (24h)
   daylightEndHour: 19,        // latest hour to consider, PT (24h)
+  // Surfline (nearshore LOLA surf height — preferred source, with Stormglass fallback)
+  surflineSpotId: process.env.SURFLINE_SPOT_ID || "5842041f4e65fad6a7708cdf", // Linda Mar State Beach
+  surflineToken: process.env.SURFLINE_TOKEN,        // recommended: access token grabbed from a logged-in browser
+  surflineEmail: process.env.SURFLINE_EMAIL,        // optional: exchanged for a token at runtime
+  surflinePassword: process.env.SURFLINE_PASSWORD,  // optional: paired with SURFLINE_EMAIL
   // Set these via environment variables (never hardcode secrets)
   stormglassApiKey: process.env.STORMGLASS_API_KEY,
   // Email alert via Resend (https://resend.com)
@@ -107,6 +114,87 @@ function fetchJson(url) {
   });
 }
 
+// ─── SURFLINE (nearshore LOLA surf height) ──────────────────────────────────
+
+const SURFLINE_HOST = "services.surfline.com";
+const BROWSER_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+
+// Generic Surfline request; never throws — resolves { status, json } so callers can fall back gracefully.
+function surflineRequest(method, pathWithQuery, { token, body } = {}) {
+  return new Promise((resolve) => {
+    const headers = {
+      "User-Agent": BROWSER_UA,
+      "Accept": "application/json",
+      "Origin": "https://www.surfline.com",
+      "Referer": "https://www.surfline.com/",
+    };
+    let payload;
+    if (body) {
+      payload = JSON.stringify(body);
+      headers["Content-Type"] = "application/json";
+      headers["Content-Length"] = Buffer.byteLength(payload);
+    }
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const req = https.request({ hostname: SURFLINE_HOST, path: pathWithQuery, method, headers }, (res) => {
+      let data = "";
+      res.on("data", (c) => (data += c));
+      res.on("end", () => {
+        let json = null;
+        try { json = JSON.parse(data); } catch (e) { /* non-JSON (e.g. bot-block HTML) */ }
+        resolve({ status: res.statusCode, json });
+      });
+    });
+    req.on("error", () => resolve({ status: 0, json: null }));
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+// Returns an access token (from SURFLINE_TOKEN, or by exchanging email/password), or null.
+async function getSurflineToken() {
+  if (CONFIG.surflineToken) return CONFIG.surflineToken;
+  if (!CONFIG.surflineEmail || !CONFIG.surflinePassword) return null;
+  const res = await surflineRequest("POST", "/trusted/token?isShortLived=false", {
+    body: {
+      grant_type: "password",
+      username: CONFIG.surflineEmail,
+      password: CONFIG.surflinePassword,
+      device_id: "linda-mar-alerts",
+      forced: true,
+    },
+  });
+  if (res.status === 200 && res.json && res.json.access_token) {
+    console.log("🔑 Surfline token obtained via email/password.");
+    return res.json.access_token;
+  }
+  console.error(`⚠️  Surfline token exchange failed (HTTP ${res.status}). ` +
+    `Set SURFLINE_TOKEN from a logged-in browser instead, or rely on the Stormglass fallback.`);
+  return null;
+}
+
+// Fetch LOLA surf heights keyed by "YYYY-MM-DDTHH" (UTC), or null on any failure.
+async function fetchSurflineSurf(token) {
+  if (!CONFIG.surflineSpotId) return null;
+  const q = `/kbyg/spots/forecasts/wave?spotId=${CONFIG.surflineSpotId}&days=${CONFIG.forecastDays}&intervalHours=1` +
+    (token ? `&accesstoken=${encodeURIComponent(token)}` : "");
+  const res = await surflineRequest("GET", q, { token });
+  const wave = res.json && res.json.data && res.json.data.wave;
+  if (res.status !== 200 || !wave) {
+    console.error(`⚠️  Surfline surf fetch failed (HTTP ${res.status}) — using Stormglass for surf height.`);
+    return null;
+  }
+  const units = (res.json.associated && res.json.associated.units && res.json.associated.units.waveHeight) || "FT";
+  const toFt = units.toUpperCase() === "M" ? metersToFeet : (x) => x;
+  const byHour = {};
+  for (const p of wave) {
+    if (!p.surf) continue;
+    const key = new Date(p.timestamp * 1000).toISOString().slice(0, 13);
+    byHour[key] = { min: toFt(p.surf.min), max: toFt(p.surf.max), human: p.surf.humanRelation || "" };
+  }
+  console.log(`🌊 Surfline LOLA surf loaded (${Object.keys(byHour).length} hours${token ? ", authenticated" : ", anonymous"}).`);
+  return byHour;
+}
+
 // ─── FETCH FORECAST ─────────────────────────────────────────────────────────
 
 async function fetchForecast() {
@@ -124,9 +212,11 @@ async function fetchForecast() {
 
   const weatherUrl = `https://api.stormglass.io/v2/weather/point?lat=${lat}&lng=${lng}&params=${params}&start=${now.toISOString()}&end=${end.toISOString()}`;
 
-  const [weatherData, tideByHour] = await Promise.all([
+  const token = await getSurflineToken();
+  const [weatherData, tideByHour, surfByHour] = await Promise.all([
     fetchJson(weatherUrl),
     fetchTideSeries(lat, lng, now, end),
+    fetchSurflineSurf(token),   // null if Surfline is unreachable → Stormglass takes over for surf height
   ]);
 
   if (weatherData.errors) {
@@ -143,18 +233,40 @@ async function fetchForecast() {
 
   return hours.map((hour) => {
     const key = hour.time.slice(0, 13); // "YYYY-MM-DDTHH"
-    const tide = tideByHour[key];
+    const hs_ft = metersToFeet(pick(hour.waveHeight) ?? 0); // Stormglass significant wave height (offshore)
+    const sl = surfByHour && surfByHour[key];
+
+    // Prefer Surfline LOLA breaking-surf height; fall back to Stormglass Hs
+    let surfSource, surf_ft, surfMin_ft = null, surfMax_ft = null, surfHuman = null;
+    if (sl) {
+      surfSource = "surfline";
+      surfMin_ft = sl.min;
+      surfMax_ft = sl.max;
+      surf_ft = (sl.min + sl.max) / 2; // representative value for the criterion check
+      surfHuman = sl.human;
+    } else {
+      surfSource = "stormglass";
+      surf_ft = hs_ft;
+    }
+
     return {
       timestamp: hour.time,
       date: new Date(hour.time),
-      waveHeight_ft: metersToFeet(pick(hour.waveHeight) ?? 0),
+      surfSource,
+      waveHeight_ft: surf_ft,        // representative surf height used for evaluation & display
+      surfMin_ft, surfMax_ft, surfHuman,
+      waveHeightHs_ft: hs_ft,        // always-available Stormglass offshore Hs
       wavePeriod_s: pick(hour.wavePeriod) ?? 0,
       waveDirection_deg: pick(hour.waveDirection) ?? 0,
       windSpeed_kts: msToKnots(pick(hour.windSpeed) ?? 0),
       windDirection_deg: pick(hour.windDirection) ?? 0,
-      tide_ft: tide ?? null,   // null = no tide reading for this hour
+      tide_ft: tide_lookup(tideByHour, key),
     };
   });
+}
+
+function tide_lookup(map, key) {
+  return map[key] ?? null; // null = no tide reading for this hour
 }
 
 // Hourly sea-level (tide height), keyed by "YYYY-MM-DDTHH" for fast lookup
@@ -174,9 +286,12 @@ async function fetchTideSeries(lat, lng, start, end) {
 
 function evaluate(c) {
   const { criteria } = CONFIG;
+  // Surf ceiling depends on the source: Surfline reports breaking-surf height,
+  // Stormglass reports offshore significant wave height (which runs higher).
+  const surfMax = c.surfSource === "surfline" ? criteria.surfHeightMax_ft : criteria.surfHeightMaxHs_ft;
   const checks = {
     surfHeight: c.waveHeight_ft >= criteria.surfHeightMin_ft &&
-                c.waveHeight_ft <= criteria.surfHeightMax_ft,
+                c.waveHeight_ft <= surfMax,
     wind:       c.windSpeed_kts <= criteria.windMax_kts,
     tide:       c.tide_ft != null &&
                 c.tide_ft >= criteria.tideMin_ft &&
@@ -255,13 +370,20 @@ function cellColor(passCount) {
   return "#b91c1c";                          // red — not it
 }
 
+function surfText(c) {
+  if (c.surfSource === "surfline" && c.surfMin_ft != null) {
+    return `${c.surfMin_ft.toFixed(1)}–${c.surfMax_ft.toFixed(1)}ft`;
+  }
+  return `${c.waveHeight_ft.toFixed(1)}ft Hs`; // Stormglass offshore significant wave height
+}
+
 function buildCell(c) {
   const { checks } = evaluate(c);
   const passCount = Object.values(checks).filter(Boolean).length;
   const mark = (ok) => (ok ? "✓" : "✗");
   const tide = c.tide_ft == null ? "n/a" : `${c.tide_ft.toFixed(1)}ft`;
   const title = `${ptDay(c.date)} ${ptTime(c.date)} — ` +
-    `Surf ${c.waveHeight_ft.toFixed(1)}ft ${mark(checks.surfHeight)} · ` +
+    `Surf ${surfText(c)} ${mark(checks.surfHeight)} · ` +
     `Swell ${c.wavePeriod_s.toFixed(0)}s ${degToCompass(c.waveDirection_deg)} ${mark(checks.swellPeriod)} · ` +
     `Wind ${c.windSpeed_kts.toFixed(1)}kt ${degToCompass(c.windDirection_deg)} ${mark(checks.wind)} · ` +
     `Tide ${tide} ${mark(checks.tide)}` +
@@ -271,6 +393,12 @@ function buildCell(c) {
 
 function generateHtml(daylight, windows, generatedAt) {
   const { criteria } = CONFIG;
+
+  const usingSurfline = daylight.some((c) => c.surfSource === "surfline");
+  const sourceBadge = usingSurfline
+    ? `<span class="badge ok">Surf: Surfline LOLA (breaking-surf height)</span>`
+    : `<span class="badge warn">Surf: Stormglass estimate (offshore wave height — Surfline unavailable)</span>`;
+  const surfMaxShown = usingSurfline ? criteria.surfHeightMax_ft : criteria.surfHeightMaxHs_ft;
 
   // group daylight hours by day, preserving chronological order
   const dayOrder = [];
@@ -334,15 +462,19 @@ function generateHtml(daylight, windows, generatedAt) {
   .hint { color: #64748b; font-size: .78rem; margin-top: .5rem; }
   footer { margin-top: 2rem; color: #64748b; font-size: .78rem; border-top: 1px solid #1e293b; padding-top: .75rem; }
   a { color: #38bdf8; }
+  .badge { display: inline-block; padding: .2rem .55rem; border-radius: 999px; font-size: .78rem; font-weight: 600; }
+  .badge.ok { background: #052e16; color: #4ade80; border: 1px solid #166534; }
+  .badge.warn { background: #2e1908; color: #fb923c; border: 1px solid #9a3412; }
 </style>
 </head>
 <body>
 <div class="wrap">
   <h1>🏄 Linda Mar — 7-Day Forecast</h1>
   <p class="sub">Updated ${ptStamp(generatedAt)} PT · refreshes daily ~6:00 AM PT</p>
+  <p class="sub">${sourceBadge}</p>
 
   <div class="criteria">
-    Your sweet spot: <b>Surf ${criteria.surfHeightMin_ft}–${criteria.surfHeightMax_ft} ft</b> ·
+    Your sweet spot: <b>Surf ${criteria.surfHeightMin_ft}–${surfMaxShown} ft</b> ·
     <b>Wind ≤ ${criteria.windMax_kts} kt</b> ·
     <b>Tide ${criteria.tideMin_ft} to ${criteria.tideMax_ft} ft</b> ·
     <b>Swell period ≥ ${criteria.swellPeriodMin_s}s</b>
@@ -485,6 +617,8 @@ async function main() {
   const matches = daylight.filter((c) => evaluate(c).passed);
   const windows = groupWindows(matches);
 
+  const surfSource = daylight.some((c) => c.surfSource === "surfline") ? "Surfline LOLA" : "Stormglass (offshore Hs fallback)";
+  console.log(`Surf-height source: ${surfSource}`);
   console.log(`Scanned ${forecast.length} forecast hours (${daylight.length} in daylight).`);
   console.log(`Found ${matches.length} matching hours across ${windows.length} window(s).`);
 

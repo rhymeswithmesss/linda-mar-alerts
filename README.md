@@ -25,6 +25,22 @@ All four must pass for an alert to fire.
 
 To adjust any threshold, edit the `criteria` block in `check-surf.js`.
 
+### Surf-height source: Surfline first, Stormglass fallback
+
+Surf height comes from **Surfline's nearshore LOLA model** (the breaking-surf height you see in the
+Surfline app) when reachable, and the `Surf 1–3 ft` target applies to it. If Surfline is unavailable
+(rate-limited, token expired, blocked), the tool **falls back to Stormglass significant wave height**,
+which is measured offshore and runs higher — so a separate, looser ceiling (`surfHeightMaxHs_ft`, ~5 ft)
+applies in that case. The dashboard shows a badge indicating which source was used.
+
+Surfline access (optional but recommended for accuracy) — set **one** of:
+| Secret | Value |
+|---|---|
+| `SURFLINE_TOKEN` | An `access_token` from a logged-in Surfline browser session (recommended) |
+| `SURFLINE_EMAIL` + `SURFLINE_PASSWORD` | Your Surfline login; exchanged for a token at runtime |
+
+With neither set, the tool still works using the (looser) Stormglass fallback.
+
 ---
 
 ## Setup (one-time, ~15 minutes)
