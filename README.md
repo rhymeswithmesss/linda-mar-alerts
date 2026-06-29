@@ -52,6 +52,18 @@ In your repo → **Settings → Secrets and variables → Actions → New reposi
 |---|---|
 | `STORMGLASS_API_KEY` | Your Stormglass API key |
 
+**Recommended — Email alert via [Resend](https://resend.com):**
+| Secret name | Value |
+|---|---|
+| `RESEND_API_KEY` | Your Resend API key (free tier: 100 emails/day) |
+| `EMAIL_TO` | The inbox to alert (e.g. `you@example.com`) |
+| `EMAIL_FROM` | *(optional)* Sender. Defaults to `Surf Alerts <onboarding@resend.dev>`, which works with no domain setup. With no verified domain, Resend only delivers to your own account email. |
+
+To get a Resend API key:
+1. Sign up at [resend.com](https://resend.com) (free)
+2. **API Keys** → **Create API Key** → copy it
+3. You can send to your own signup email immediately with no domain verification
+
 **Optional — Slack DM alert:**
 | Secret name | Value |
 |---|---|

@@ -29,6 +29,10 @@ const CONFIG = {
   },
   // Set these via environment variables (never hardcode secrets)
   stormglassApiKey: process.env.STORMGLASS_API_KEY,
+  // Email alert via Resend (https://resend.com)
+  resendApiKey: process.env.RESEND_API_KEY,                                   // required for email
+  emailTo: process.env.EMAIL_TO,                                              // your inbox, e.g. "you@example.com"
+  emailFrom: process.env.EMAIL_FROM || "Surf Alerts <onboarding@resend.dev>", // default sender works with no domain setup
   slackWebhookUrl: process.env.SLACK_WEBHOOK_URL,   // optional
   twilioAccountSid: process.env.TWILIO_ACCOUNT_SID, // optional
   twilioAuthToken: process.env.TWILIO_AUTH_TOKEN,   // optional
@@ -185,6 +189,41 @@ async function notifySlack(message) {
   });
 }
 
+async function notifyEmail(message) {
+  if (!CONFIG.resendApiKey || !CONFIG.emailTo) return;
+  const body = JSON.stringify({
+    from: CONFIG.emailFrom,
+    to: [CONFIG.emailTo],
+    subject: "🏄 Linda Mar sweet spot is firing",
+    text: message.replace(/\*/g, ""),   // strip Slack-style markdown for plain email
+  });
+
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: "api.resend.com",
+      path: "/emails",
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${CONFIG.resendApiKey}`,
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(body),
+      },
+    }, (res) => {
+      let data = "";
+      res.on("data", (chunk) => (data += chunk));
+      res.on("end", () => {
+        if (res.statusCode >= 400) {
+          console.error(`⚠️  Resend returned ${res.statusCode}: ${data}`);
+        }
+        resolve(res.statusCode);
+      });
+    });
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
+
 async function notifySMS(message) {
   if (!CONFIG.twilioAccountSid || !CONFIG.twilioAuthToken) return;
   const body = new URLSearchParams({
@@ -235,6 +274,7 @@ async function main() {
     console.log("\n🏄 Sweet spot conditions! Sending alerts...");
     const message = formatMessage(conditions, checks);
     await Promise.all([
+      notifyEmail(message),
       notifySlack(message),
       notifySMS(message),
     ]);
