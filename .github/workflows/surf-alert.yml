@@ -2,14 +2,14 @@ name: Linda Mar Surf Alert
 
 on:
   # Runs every morning during surf season hours (PT = UTC-7/8)
-  # Checks at 5:30am, 6:00am, 6:30am, 7:00am, 7:30am, 8:00am PT
+  # 5 checks/day to stay within Stormglass free tier (10 calls/day; 2 calls per run)
+  # Checks at 5:30am, 6:15am, 7:00am, 7:45am, 8:30am PT
   schedule:
     - cron: "30 12 * * *"   # 5:30am PT (UTC-7)
-    - cron: "0 13 * * *"    # 6:00am PT
-    - cron: "30 13 * * *"   # 6:30am PT
+    - cron: "15 13 * * *"   # 6:15am PT
     - cron: "0 14 * * *"    # 7:00am PT
-    - cron: "30 14 * * *"   # 7:30am PT
-    - cron: "0 15 * * *"    # 8:00am PT
+    - cron: "45 14 * * *"   # 7:45am PT
+    - cron: "30 15 * * *"   # 8:30am PT
 
   # Also allows manual trigger for testing
   workflow_dispatch:
