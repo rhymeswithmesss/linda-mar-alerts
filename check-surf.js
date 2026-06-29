@@ -1,12 +1,16 @@
 /**
- * Linda Mar Surf Alert
- * Checks Stormglass API and notifies via Slack/SMS when conditions match your sweet spot.
+ * Linda Mar Surf Alert — 7-day forecast digest
+ * Scans the Stormglass forecast for upcoming hours that match your sweet spot,
+ * groups them into windows, and emails a once-a-day digest (Slack/SMS optional).
  *
  * Sweet spot criteria (from your screenshot):
  *   - Surf height:  1–3 ft (small but rideable)
  *   - Wind speed:   ≤ 5 kts (glassy / light)
  *   - Tide height:  -1.0 ft to +1.0 ft (low tide window)
  *   - Primary swell period: ≥ 8s (some shape)
+ *
+ * Only daylight hours are considered, and an alert is sent only when at least
+ * one matching window exists in the forecast.
  */
 
 const https = require("https");
@@ -27,6 +31,9 @@ const CONFIG = {
     tideMax_ft: 1.0,          // low tide window end
     swellPeriodMin_s: 8,      // minimum swell period for shape
   },
+  forecastDays: 7,            // how far ahead to scan (Stormglass free tier returns ~7-10 days)
+  daylightStartHour: 6,       // earliest hour to consider, PT (24h)
+  daylightEndHour: 19,        // latest hour to consider, PT (24h)
   // Set these via environment variables (never hardcode secrets)
   stormglassApiKey: process.env.STORMGLASS_API_KEY,
   // Email alert via Resend (https://resend.com)
@@ -50,6 +57,22 @@ function msToKnots(ms) {
   return ms * 1.94384;
 }
 
+function degToCompass(deg) {
+  const dirs = ["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"];
+  return dirs[Math.round(deg / 22.5) % 16];
+}
+
+// Hour-of-day (0-23) for a timestamp, in Pacific time
+const _ptHourFmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", hour: "2-digit", hourCycle: "h23" });
+function ptHour(date) {
+  return parseInt(_ptHourFmt.format(date), 10);
+}
+
+const _ptDayFmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", weekday: "short", month: "short", day: "numeric" });
+const _ptTimeFmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", hour: "numeric", minute: "2-digit" });
+const ptDay = (date) => _ptDayFmt.format(date);
+const ptTime = (date) => _ptTimeFmt.format(date);
+
 function fetchJson(url) {
   return new Promise((resolve, reject) => {
     const options = {
@@ -62,139 +85,153 @@ function fetchJson(url) {
         try {
           resolve(JSON.parse(data));
         } catch (e) {
-          reject(new Error(`Failed to parse response: ${data}`));
+          reject(new Error(`Failed to parse response (HTTP ${res.statusCode}): ${data}`));
         }
       });
     }).on("error", reject);
   });
 }
 
-// ─── FETCH CONDITIONS ─────────────────────────────────────────────────────────
+// ─── FETCH FORECAST ─────────────────────────────────────────────────────────
 
-async function fetchConditions() {
+async function fetchForecast() {
   const { lat, lng } = CONFIG.location;
   const params = [
-    "waveHeight",        // significant wave height (m)
-    "wavePeriod",        // swell period (s)
-    "waveDirection",     // swell direction (°)
-    "windSpeed",         // wind speed (m/s)
-    "windDirection",     // wind direction (°)
-    "waterTemperature",  // water temp (°C)
+    "waveHeight",     // significant wave height (m)
+    "wavePeriod",     // swell period (s)
+    "waveDirection",  // swell direction (°)
+    "windSpeed",      // wind speed (m/s)
+    "windDirection",  // wind direction (°)
   ].join(",");
 
   const now = new Date();
-  const end = new Date(now.getTime() + 3 * 60 * 60 * 1000); // next 3 hours
+  const end = new Date(now.getTime() + CONFIG.forecastDays * 24 * 60 * 60 * 1000);
 
-  const url = `https://api.stormglass.io/v2/weather/point?lat=${lat}&lng=${lng}&params=${params}&start=${now.toISOString()}&end=${end.toISOString()}`;
+  const weatherUrl = `https://api.stormglass.io/v2/weather/point?lat=${lat}&lng=${lng}&params=${params}&start=${now.toISOString()}&end=${end.toISOString()}`;
 
-  const [weatherData, tideData] = await Promise.all([
-    fetchJson(url),
-    fetchTide(lat, lng, now, end),
+  const [weatherData, tideByHour] = await Promise.all([
+    fetchJson(weatherUrl),
+    fetchTideSeries(lat, lng, now, end),
   ]);
 
-  // Use the first hour's data point
-  const hour = weatherData.hours?.[0];
-  if (!hour) throw new Error("No weather data returned from Stormglass");
+  if (weatherData.errors) {
+    throw new Error(`Stormglass error: ${JSON.stringify(weatherData.errors)}`);
+  }
+  const hours = weatherData.hours;
+  if (!hours || hours.length === 0) throw new Error("No weather data returned from Stormglass");
 
   // Stormglass returns values from multiple sources — prefer NOAA or sg (Stormglass model)
-  const pick = (param) => {
-    const sources = hour[param];
+  const pick = (sources) => {
     if (!sources) return null;
     return (sources.noaa ?? sources.sg ?? sources.meteo ?? Object.values(sources)[0]);
   };
 
-  return {
-    timestamp: hour.time,
-    waveHeight_ft: metersToFeet(pick("waveHeight") ?? 0),
-    wavePeriod_s: pick("wavePeriod") ?? 0,
-    waveDirection_deg: pick("waveDirection") ?? 0,
-    windSpeed_kts: msToKnots(pick("windSpeed") ?? 0),
-    windDirection_deg: pick("windDirection") ?? 0,
-    tide_ft: tideData,
-  };
+  return hours.map((hour) => {
+    const key = hour.time.slice(0, 13); // "YYYY-MM-DDTHH"
+    const tide = tideByHour[key];
+    return {
+      timestamp: hour.time,
+      date: new Date(hour.time),
+      waveHeight_ft: metersToFeet(pick(hour.waveHeight) ?? 0),
+      wavePeriod_s: pick(hour.wavePeriod) ?? 0,
+      waveDirection_deg: pick(hour.waveDirection) ?? 0,
+      windSpeed_kts: msToKnots(pick(hour.windSpeed) ?? 0),
+      windDirection_deg: pick(hour.windDirection) ?? 0,
+      tide_ft: tide ?? null,   // null = no tide reading for this hour
+    };
+  });
 }
 
-async function fetchTide(lat, lng, start, end) {
-  const url = `https://api.stormglass.io/v2/tide/extremes/point?lat=${lat}&lng=${lng}&start=${start.toISOString()}&end=${end.toISOString()}`;
+// Hourly sea-level (tide height), keyed by "YYYY-MM-DDTHH" for fast lookup
+async function fetchTideSeries(lat, lng, start, end) {
+  const url = `https://api.stormglass.io/v2/tide/sea-level/point?lat=${lat}&lng=${lng}&start=${start.toISOString()}&end=${end.toISOString()}`;
   const data = await fetchJson(url);
-  // Return current tide height from the nearest extreme, or use a sea-level estimate
-  if (data.data && data.data.length > 0) {
-    return metersToFeet(data.data[0].height ?? 0);
+  const byHour = {};
+  if (data.data) {
+    for (const point of data.data) {
+      byHour[point.time.slice(0, 13)] = metersToFeet(point.sg ?? 0);
+    }
   }
-  return 0; // fallback
+  return byHour;
 }
 
 // ─── EVALUATE CONDITIONS ──────────────────────────────────────────────────────
 
-function evaluate(conditions) {
+function evaluate(c) {
   const { criteria } = CONFIG;
   const checks = {
-    surfHeight: conditions.waveHeight_ft >= criteria.surfHeightMin_ft &&
-                conditions.waveHeight_ft <= criteria.surfHeightMax_ft,
-    wind:       conditions.windSpeed_kts <= criteria.windMax_kts,
-    tide:       conditions.tide_ft >= criteria.tideMin_ft &&
-                conditions.tide_ft <= criteria.tideMax_ft,
-    swellPeriod: conditions.wavePeriod_s >= criteria.swellPeriodMin_s,
+    surfHeight: c.waveHeight_ft >= criteria.surfHeightMin_ft &&
+                c.waveHeight_ft <= criteria.surfHeightMax_ft,
+    wind:       c.windSpeed_kts <= criteria.windMax_kts,
+    tide:       c.tide_ft != null &&
+                c.tide_ft >= criteria.tideMin_ft &&
+                c.tide_ft <= criteria.tideMax_ft,
+    swellPeriod: c.wavePeriod_s >= criteria.swellPeriodMin_s,
   };
-
   const passed = Object.values(checks).every(Boolean);
   return { passed, checks };
 }
 
-// ─── FORMAT MESSAGE ───────────────────────────────────────────────────────────
-
-function formatMessage(conditions, checks) {
-  const { name } = CONFIG.location;
-  const dir = degToCompass(conditions.waveDirection_deg);
-  const windDir = degToCompass(conditions.windDirection_deg);
-
-  const checkMark = (passed) => passed ? "✅" : "❌";
-
-  return `
-🏄 *Linda Mar Sweet Spot Alert!*
-
-Conditions at *${name}* are matching your sweet spot right now:
-
-${checkMark(checks.surfHeight)} *Surf:* ${conditions.waveHeight_ft.toFixed(1)} ft
-${checkMark(checks.swellPeriod)} *Swell:* ${conditions.waveHeight_ft.toFixed(1)} ft @ ${conditions.wavePeriod_s.toFixed(0)}s ${dir}
-${checkMark(checks.wind)} *Wind:* ${conditions.windSpeed_kts.toFixed(1)} kts ${windDir}
-${checkMark(checks.tide)} *Tide:* ${conditions.tide_ft.toFixed(1)} ft
-
-🕐 Checked at ${new Date(conditions.timestamp).toLocaleTimeString("en-US", { timeZone: "America/Los_Angeles" })} PT
-🔗 https://www.surfline.com/surf-report/linda-mar-state-beach/5842041f4e65fad6a7708cdf
-`.trim();
+// Group consecutive matching hours into windows
+function groupWindows(matches) {
+  const windows = [];
+  let current = null;
+  for (const c of matches) {
+    if (current && c.date.getTime() - current.hours[current.hours.length - 1].date.getTime() <= 60 * 60 * 1000 + 1000) {
+      current.hours.push(c);
+    } else {
+      current = { hours: [c] };
+      windows.push(current);
+    }
+  }
+  return windows;
 }
 
-function degToCompass(deg) {
-  const dirs = ["N","NNE","NE","ENE","E","ESE","SE","SSE","S","SSW","SW","WSW","W","WNW","NW","NNW"];
-  return dirs[Math.round(deg / 22.5) % 16];
+// ─── FORMAT MESSAGE ───────────────────────────────────────────────────────────
+
+function range(values, digits = 1) {
+  const min = Math.min(...values).toFixed(digits);
+  const max = Math.max(...values).toFixed(digits);
+  return min === max ? min : `${min}–${max}`;
+}
+
+function formatWindow(w) {
+  const hrs = w.hours;
+  const start = hrs[0].date;
+  const end = new Date(hrs[hrs.length - 1].date.getTime() + 60 * 60 * 1000); // window covers through end of last hour
+  const peak = hrs[Math.floor(hrs.length / 2)]; // representative middle hour for direction
+
+  const surf = range(hrs.map((h) => h.waveHeight_ft));
+  const period = range(hrs.map((h) => h.wavePeriod_s), 0);
+  const wind = Math.max(...hrs.map((h) => h.windSpeed_kts)).toFixed(1);
+  const tide = range(hrs.map((h) => h.tide_ft));
+
+  return `📅 *${ptDay(start)}*, ${ptTime(start)}–${ptTime(end)} PT
+   Surf ${surf} ft · Swell ${period}s ${degToCompass(peak.waveDirection_deg)} · Wind ≤${wind} kts ${degToCompass(peak.windDirection_deg)} · Tide ${tide} ft`;
+}
+
+function formatDigest(windows) {
+  const { name } = CONFIG.location;
+  const n = windows.length;
+  const header = `🏄 *Linda Mar — ${n} sweet-spot window${n === 1 ? "" : "s"} in the next ${CONFIG.forecastDays} days*`;
+  const body = windows.map(formatWindow).join("\n\n");
+  return `${header}
+
+Upcoming windows at *${name}* matching your sweet spot (1–3ft, ≤5kt wind, -1 to +1ft tide, ≥8s period):
+
+${body}
+
+🔗 https://www.surfline.com/surf-report/linda-mar-state-beach/5842041f4e65fad6a7708cdf`;
 }
 
 // ─── NOTIFY ───────────────────────────────────────────────────────────────────
 
-async function notifySlack(message) {
-  if (!CONFIG.slackWebhookUrl) return;
-  const body = JSON.stringify({ text: message });
-  return new Promise((resolve, reject) => {
-    const url = new URL(CONFIG.slackWebhookUrl);
-    const req = https.request({
-      hostname: url.hostname,
-      path: url.pathname,
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
-    }, (res) => { resolve(res.statusCode); });
-    req.on("error", reject);
-    req.write(body);
-    req.end();
-  });
-}
-
-async function notifyEmail(message) {
+async function notifyEmail(subject, message) {
   if (!CONFIG.resendApiKey || !CONFIG.emailTo) return;
   const body = JSON.stringify({
     from: CONFIG.emailFrom,
     to: [CONFIG.emailTo],
-    subject: "🏄 Linda Mar sweet spot is firing",
+    subject,
     text: message.replace(/\*/g, ""),   // strip Slack-style markdown for plain email
   });
 
@@ -218,6 +255,23 @@ async function notifyEmail(message) {
         resolve(res.statusCode);
       });
     });
+    req.on("error", reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+async function notifySlack(message) {
+  if (!CONFIG.slackWebhookUrl) return;
+  const body = JSON.stringify({ text: message });
+  return new Promise((resolve, reject) => {
+    const url = new URL(CONFIG.slackWebhookUrl);
+    const req = https.request({
+      hostname: url.hostname,
+      path: url.pathname,
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+    }, (res) => { resolve(res.statusCode); });
     req.on("error", reject);
     req.write(body);
     req.end();
@@ -258,30 +312,40 @@ async function main() {
     process.exit(1);
   }
 
-  console.log(`🌊 Checking conditions at ${CONFIG.location.name}...`);
+  console.log(`🌊 Scanning ${CONFIG.forecastDays}-day forecast for ${CONFIG.location.name}...`);
 
-  const conditions = await fetchConditions();
-  const { passed, checks } = evaluate(conditions);
+  const forecast = await fetchForecast();
+  const daylight = forecast.filter((c) => {
+    const h = ptHour(c.date);
+    return h >= CONFIG.daylightStartHour && h <= CONFIG.daylightEndHour;
+  });
 
-  console.log("\nCurrent conditions:");
-  console.log(`  Surf:   ${conditions.waveHeight_ft.toFixed(1)} ft`);
-  console.log(`  Swell:  ${conditions.wavePeriod_s.toFixed(0)}s @ ${degToCompass(conditions.waveDirection_deg)}`);
-  console.log(`  Wind:   ${conditions.windSpeed_kts.toFixed(1)} kts ${degToCompass(conditions.windDirection_deg)}`);
-  console.log(`  Tide:   ${conditions.tide_ft.toFixed(1)} ft`);
-  console.log(`\nChecks: ${JSON.stringify(checks, null, 2)}`);
+  const matches = daylight.filter((c) => evaluate(c).passed);
+  const windows = groupWindows(matches);
 
-  if (passed) {
-    console.log("\n🏄 Sweet spot conditions! Sending alerts...");
-    const message = formatMessage(conditions, checks);
-    await Promise.all([
-      notifyEmail(message),
-      notifySlack(message),
-      notifySMS(message),
-    ]);
-    console.log("✅ Alerts sent.");
-  } else {
-    console.log("\n😐 Conditions don't match yet. No alert sent.");
+  console.log(`Scanned ${forecast.length} forecast hours (${daylight.length} in daylight).`);
+  console.log(`Found ${matches.length} matching hours across ${windows.length} window(s).`);
+
+  if (windows.length === 0) {
+    console.log("\n😐 No sweet-spot windows in the forecast. No alert sent.");
+    return;
   }
+
+  for (const w of windows) {
+    const start = w.hours[0].date;
+    const end = new Date(w.hours[w.hours.length - 1].date.getTime() + 60 * 60 * 1000);
+    console.log(`  🏄 ${ptDay(start)} ${ptTime(start)}–${ptTime(end)} PT (${w.hours.length}h)`);
+  }
+
+  console.log("\n📨 Sending digest...");
+  const message = formatDigest(windows);
+  const subject = `🏄 Linda Mar: ${windows.length} sweet-spot window${windows.length === 1 ? "" : "s"} ahead`;
+  await Promise.all([
+    notifyEmail(subject, message),
+    notifySlack(message),
+    notifySMS(message),
+  ]);
+  console.log("✅ Digest sent.");
 }
 
 main().catch((err) => {

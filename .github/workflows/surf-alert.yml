@@ -1,15 +1,11 @@
 name: Linda Mar Surf Alert
 
 on:
-  # Runs every morning during surf season hours (PT = UTC-7/8)
-  # 5 checks/day to stay within Stormglass free tier (10 calls/day; 2 calls per run)
-  # Checks at 5:30am, 6:15am, 7:00am, 7:45am, 8:30am PT
+  # Once a day: scans the 7-day forecast and emails a digest of upcoming
+  # sweet-spot windows. 2 API calls/run (weather + tide) = well within the
+  # Stormglass free tier of 10 calls/day. (PT = UTC-7 in summer / UTC-8 in winter)
   schedule:
-    - cron: "30 12 * * *"   # 5:30am PT (UTC-7)
-    - cron: "15 13 * * *"   # 6:15am PT
-    - cron: "0 14 * * *"    # 7:00am PT
-    - cron: "45 14 * * *"   # 7:45am PT
-    - cron: "30 15 * * *"   # 8:30am PT
+    - cron: "0 13 * * *"    # 6:00am PT (UTC-7) — morning forecast digest
 
   # Also allows manual trigger for testing
   workflow_dispatch:
