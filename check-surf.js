@@ -14,6 +14,10 @@
  */
 
 const https = require("https");
+const fs = require("fs");
+const path = require("path");
+
+const DASHBOARD_PATH = process.env.DASHBOARD_PATH || "public/index.html";
 
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 
@@ -72,6 +76,17 @@ const _ptDayFmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Ange
 const _ptTimeFmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", hour: "numeric", minute: "2-digit" });
 const ptDay = (date) => _ptDayFmt.format(date);
 const ptTime = (date) => _ptTimeFmt.format(date);
+
+const _ptStampFmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/Los_Angeles", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+const ptStamp = (date) => _ptStampFmt.format(date);
+
+// "6a", "12p", "7p" style hour label
+function hourLabel(h) {
+  const ap = h < 12 ? "a" : "p";
+  let hr = h % 12;
+  if (hr === 0) hr = 12;
+  return `${hr}${ap}`;
+}
 
 function fetchJson(url) {
   return new Promise((resolve, reject) => {
@@ -224,6 +239,153 @@ ${body}
 🔗 https://www.surfline.com/surf-report/linda-mar-state-beach/5842041f4e65fad6a7708cdf`;
 }
 
+// ─── DASHBOARD (GitHub Pages) ───────────────────────────────────────────────
+
+const CRIT_LABELS = {
+  surfHeight: "Surf",
+  swellPeriod: "Swell",
+  wind: "Wind",
+  tide: "Tide",
+};
+
+function cellColor(passCount) {
+  if (passCount === 4) return "#15803d";   // green — all match
+  if (passCount === 3) return "#ca8a04";   // amber — close
+  if (passCount === 2) return "#ea580c";   // orange
+  return "#b91c1c";                          // red — not it
+}
+
+function buildCell(c) {
+  const { checks } = evaluate(c);
+  const passCount = Object.values(checks).filter(Boolean).length;
+  const mark = (ok) => (ok ? "✓" : "✗");
+  const tide = c.tide_ft == null ? "n/a" : `${c.tide_ft.toFixed(1)}ft`;
+  const title = `${ptDay(c.date)} ${ptTime(c.date)} — ` +
+    `Surf ${c.waveHeight_ft.toFixed(1)}ft ${mark(checks.surfHeight)} · ` +
+    `Swell ${c.wavePeriod_s.toFixed(0)}s ${degToCompass(c.waveDirection_deg)} ${mark(checks.swellPeriod)} · ` +
+    `Wind ${c.windSpeed_kts.toFixed(1)}kt ${degToCompass(c.windDirection_deg)} ${mark(checks.wind)} · ` +
+    `Tide ${tide} ${mark(checks.tide)}` +
+    (passCount === 4 ? "  →  MATCH 🏄" : "");
+  return { passCount, surf: c.waveHeight_ft, title };
+}
+
+function generateHtml(daylight, windows, generatedAt) {
+  const { criteria } = CONFIG;
+
+  // group daylight hours by day, preserving chronological order
+  const dayOrder = [];
+  const byDay = new Map();
+  for (const c of daylight) {
+    const label = ptDay(c.date);
+    if (!byDay.has(label)) { byDay.set(label, {}); dayOrder.push(label); }
+    byDay.get(label)[ptHour(c.date)] = buildCell(c);
+  }
+
+  const hours = [];
+  for (let h = CONFIG.daylightStartHour; h <= CONFIG.daylightEndHour; h++) hours.push(h);
+
+  const headerCells = hours.map((h) => `<th>${hourLabel(h)}</th>`).join("");
+  const rows = dayOrder.map((label) => {
+    const cells = hours.map((h) => {
+      const cell = byDay.get(label)[h];
+      if (!cell) return `<td class="empty"></td>`;
+      return `<td style="background:${cellColor(cell.passCount)}" title="${cell.title}">${cell.surf.toFixed(1)}</td>`;
+    }).join("");
+    return `<tr><th class="day">${label}</th>${cells}</tr>`;
+  }).join("\n");
+
+  const windowSummary = windows.length === 0
+    ? `<p class="none">No sweet-spot windows in the next ${CONFIG.forecastDays} days — but check back daily, the forecast shifts.</p>`
+    : `<ul class="windows">` + windows.map((w) => {
+        const start = w.hours[0].date;
+        const end = new Date(w.hours[w.hours.length - 1].date.getTime() + 60 * 60 * 1000);
+        const surf = range(w.hours.map((h) => h.waveHeight_ft));
+        return `<li><strong>${ptDay(start)}</strong> ${ptTime(start)}–${ptTime(end)} PT · Surf ${surf} ft</li>`;
+      }).join("") + `</ul>`;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="refresh" content="3600">
+<title>🏄 Linda Mar — 7-Day Surf Forecast</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 1.25rem; background: #0b1220; color: #e5e7eb; }
+  .wrap { max-width: 920px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
+  .sub { color: #94a3b8; font-size: .85rem; margin: 0 0 1rem; }
+  .criteria { background: #111c30; border: 1px solid #1e293b; border-radius: 10px; padding: .75rem 1rem; font-size: .9rem; margin-bottom: 1rem; }
+  .criteria b { color: #38bdf8; }
+  h2 { font-size: 1.05rem; margin: 1.5rem 0 .5rem; }
+  .scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; border-radius: 10px; }
+  table { border-collapse: collapse; width: 100%; font-size: .8rem; }
+  th, td { text-align: center; padding: .4rem .3rem; min-width: 34px; }
+  thead th { color: #94a3b8; font-weight: 600; border-bottom: 1px solid #1e293b; }
+  th.day { text-align: left; white-space: nowrap; color: #cbd5e1; font-weight: 600; padding-right: .6rem; position: sticky; left: 0; background: #0b1220; }
+  td { color: #fff; font-weight: 600; border-radius: 4px; cursor: default; }
+  td.empty { background: transparent; }
+  .legend { display: flex; flex-wrap: wrap; gap: .75rem; font-size: .8rem; color: #cbd5e1; margin: .75rem 0 0; }
+  .legend span { display: inline-flex; align-items: center; gap: .35rem; }
+  .swatch { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+  .windows { padding-left: 1.1rem; line-height: 1.7; }
+  .none { color: #94a3b8; }
+  .hint { color: #64748b; font-size: .78rem; margin-top: .5rem; }
+  footer { margin-top: 2rem; color: #64748b; font-size: .78rem; border-top: 1px solid #1e293b; padding-top: .75rem; }
+  a { color: #38bdf8; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🏄 Linda Mar — 7-Day Forecast</h1>
+  <p class="sub">Updated ${ptStamp(generatedAt)} PT · refreshes daily ~6:00 AM PT</p>
+
+  <div class="criteria">
+    Your sweet spot: <b>Surf ${criteria.surfHeightMin_ft}–${criteria.surfHeightMax_ft} ft</b> ·
+    <b>Wind ≤ ${criteria.windMax_kts} kt</b> ·
+    <b>Tide ${criteria.tideMin_ft} to ${criteria.tideMax_ft} ft</b> ·
+    <b>Period ≥ ${criteria.swellPeriodMin_s}s</b>
+  </div>
+
+  <h2>Daylight hours (number = surf height, ft)</h2>
+  <div class="scroll">
+    <table>
+      <thead><tr><th class="day"></th>${headerCells}</tr></thead>
+      <tbody>
+${rows}
+      </tbody>
+    </table>
+  </div>
+  <div class="legend">
+    <span><i class="swatch" style="background:#15803d"></i> all 4 match</span>
+    <span><i class="swatch" style="background:#ca8a04"></i> 3 of 4</span>
+    <span><i class="swatch" style="background:#ea580c"></i> 2 of 4</span>
+    <span><i class="swatch" style="background:#b91c1c"></i> &lt; 2</span>
+  </div>
+  <p class="hint">Hover (or long-press) a cell for the full breakdown of which criteria pass.</p>
+
+  <h2>Matching windows</h2>
+  ${windowSummary}
+
+  <footer>
+    Data: <a href="https://stormglass.io">Stormglass</a> marine forecast ·
+    <a href="https://www.surfline.com/surf-report/linda-mar-state-beach/5842041f4e65fad6a7708cdf">Surfline report</a><br>
+    Generated by <a href="https://github.com/rhymeswithmesss/linda-mar-alerts">linda-mar-alerts</a>.
+  </footer>
+</div>
+</body>
+</html>
+`;
+}
+
+function writeDashboard(html) {
+  const dir = path.dirname(DASHBOARD_PATH);
+  if (dir && dir !== ".") fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(DASHBOARD_PATH, html);
+  console.log(`📊 Dashboard written to ${DASHBOARD_PATH}`);
+}
+
 // ─── NOTIFY ───────────────────────────────────────────────────────────────────
 
 async function notifyEmail(subject, message) {
@@ -325,6 +487,9 @@ async function main() {
 
   console.log(`Scanned ${forecast.length} forecast hours (${daylight.length} in daylight).`);
   console.log(`Found ${matches.length} matching hours across ${windows.length} window(s).`);
+
+  // Always render the dashboard, even when nothing matches
+  writeDashboard(generateHtml(daylight, windows, new Date()));
 
   if (windows.length === 0) {
     console.log("\n😐 No sweet-spot windows in the forecast. No alert sent.");

@@ -3,6 +3,11 @@
 Notifies you when Linda Mar conditions match your personal sweet spot:
 small (1–3ft), glassy (≤5 kts wind), low tide (-1 to +1 ft), with some shape (≥8s period).
 
+Once a day it scans the 7-day forecast, **emails a digest** of upcoming matching windows, and
+**publishes a color-coded dashboard** (every daylight hour, ✅/❌ per criterion) to GitHub Pages:
+
+📊 **Dashboard:** https://rhymeswithmesss.github.io/linda-mar-alerts/
+
 Runs free on GitHub Actions — no server needed.
 
 ---

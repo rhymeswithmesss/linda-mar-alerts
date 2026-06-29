@@ -1,18 +1,30 @@
 name: Linda Mar Surf Alert
 
 on:
-  # Once a day: scans the 7-day forecast and emails a digest of upcoming
-  # sweet-spot windows. 2 API calls/run (weather + tide) = well within the
-  # Stormglass free tier of 10 calls/day. (PT = UTC-7 in summer / UTC-8 in winter)
+  # Once a day: scans the 7-day forecast, emails a digest of upcoming
+  # sweet-spot windows, and publishes the full forecast dashboard to GitHub Pages.
+  # 2 API calls/run (weather + tide) = well within the Stormglass free tier of
+  # 10 calls/day. (PT = UTC-7 in summer / UTC-8 in winter)
   schedule:
-    - cron: "0 13 * * *"    # 6:00am PT (UTC-7) — morning forecast digest
+    - cron: "0 13 * * *"    # 6:00am PT (UTC-7) — morning forecast digest + dashboard refresh
 
-  # Also allows manual trigger for testing
+  # Also allows manual trigger for testing / on-demand refresh
   workflow_dispatch:
 
+# Allow the deploy job to publish to GitHub Pages
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deployment at a time
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
 jobs:
-  check-surf:
-    name: Check Linda Mar Conditions
+  build:
+    name: Check conditions & build dashboard
     runs-on: ubuntu-latest
 
     steps:
@@ -24,7 +36,7 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Check surf conditions
+      - name: Check surf conditions & generate dashboard
         env:
           STORMGLASS_API_KEY: ${{ secrets.STORMGLASS_API_KEY }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
@@ -36,3 +48,20 @@ jobs:
           TWILIO_FROM: ${{ secrets.TWILIO_FROM }}
           TWILIO_TO: ${{ secrets.TWILIO_TO }}
         run: node check-surf.js
+
+      - name: Upload dashboard artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: public
+
+  deploy:
+    name: Publish dashboard to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
